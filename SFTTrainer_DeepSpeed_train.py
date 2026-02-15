@@ -3,7 +3,7 @@
 import json
 import random
 
-from transformers import AutoTokenizer, AutoModelForCausalLM, TraningArguments
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments
 from datasets import Dataset
 from trl import SFTTrainer
 
