@@ -1,16 +1,23 @@
 import json
 import random
+import torch
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments
 from datasets import Dataset
 from trl import SFTTrainer, SFTConfig
 
 
-model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3.1-8B", device_map="auto")
+# model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3.1-8B", device_map="auto")
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Meta-Llama-3.1-8B",
+    attn_implementation="flash_attention_2",
+    dtype=torch.bfloat16,
+    device_map="auto",
+)
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
 
 
-with open("finetuning-tutorial/alpaca_gpt4_data.json", "r") as f:
+with open("alpaca_gpt4_data.json", "r") as f:
     dataset = json.load(f)
 
 random.shuffle(dataset) #shuffle inplace
@@ -49,7 +56,7 @@ training_args = SFTConfig(
     num_train_epochs=epochs,
     bf16=True,
     lr_scheduler_type="cosine",
-    warmup_ratio=0.1,
+    warmup_steps=0.1,
     eval_strategy="epoch",
     logging_first_step=True,
     max_length=1024,

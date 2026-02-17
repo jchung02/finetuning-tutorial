@@ -21,7 +21,7 @@ tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B")
 # -------------------------------------------------
 # 2. Load Alpaca dataset
 # -------------------------------------------------
-with open("finetuning-tutorial/alpaca_gpt4_data.json", "r") as f:
+with open("alpaca_gpt4_data.json", "r") as f: # relative path
     alpaca = json.load(f)
 
 
