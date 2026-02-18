@@ -73,4 +73,4 @@ trainer = SFTTrainer(
 
 trainer.train()
 
-trainer.save_model("./finetuning-tutorial")
+trainer.save_model("./logs/")
