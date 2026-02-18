@@ -1,0 +1,16 @@
+# Use case: Data Parallel (DDP) across 2 GPUs — each GPU holds a full model replica;
+#           gradients are averaged via all-reduce after each backward pass.
+# Run: accelerate launch --config_file configs/ddp_2gpu.yaml multi-gpu/parallelism_accelerate.py
+
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU
+mixed_precision: bf16
+num_processes: 2
+num_machines: 1
+machine_rank: 0
+main_training_function: main
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+gpu_ids: all
+same_network: true
+use_cpu: false

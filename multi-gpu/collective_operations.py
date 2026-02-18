@@ -1,3 +1,4 @@
+# $ torchrun --nproc_per_node=4 multi-gpu/collective_operations.py
 ###### 1. Broadcasting
 import torch
 import torch.distributed as dist

@@ -144,6 +144,8 @@ def loss_fn(x, y):
 def validate():
     model.eval()
 
+    total_loss = 0.0
+    total_steps = 0
     for step, batch in enumerate(tqdm(eval_dataloader)):
         batch["input_ids"] = batch["input_ids"].to("cuda")
         batch["labels"] = batch["labels"].to("cuda")
@@ -152,7 +154,10 @@ def validate():
             out = model(**batch)
             loss = loss_fn(out.logits, batch["labels"])
 
-    print("Eval Loss:", loss.item())
+        total_loss += loss.item()
+        total_steps += 1
+
+    print("Eval Loss:", total_loss / total_steps)
     model.train()
 
 
