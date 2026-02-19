@@ -66,56 +66,69 @@ DS_CONFIG = {
 # LLaMA 원래 구조:
 #   input_ids → embed_tokens → [decoder_layer × 32] → norm → lm_head → logits
 #
-# Pipeline용 변환:
-#   input_ids → [EmbeddingLayer] → [TransformerBlock × 32] → [NormLMHeadLayer] → logits
+# Pipeline용 변환 (튜플 전달 방식):
+#   input_ids → [EmbeddingLayer] → (hidden, cos, sin)
+#            → [TransformerBlock × 32] → (hidden, cos, sin)
+#            → [NormLMHeadLayer] → logits
+#
+# 최신 transformers에서 RoPE(cos, sin)는 LlamaModel 상위에서 한 번 계산되어
+# 각 decoder layer로 전달됩니다. Pipeline에서는 이를 튜플에 담아 함께 넘깁니다.
 # ============================================================
 
 class EmbeddingLayer(nn.Module):
+    """Token ID → Embedding + RoPE 계산 (파이프라인 첫 번째 스테이지)"""
+
     def __init__(self, embed_tokens, rotary_emb):
         super().__init__()
         self.embed_tokens = embed_tokens
-        self.rotary_emb = rotary_emb  # ✅ 상위에서 가져온 rotary_emb
+        self.rotary_emb = rotary_emb  # LlamaModel.rotary_emb
 
     def forward(self, input_ids):
-        input_ids = input_ids.long()
-        hidden_states = self.embed_tokens(input_ids)
+        # input_ids가 float로 캐스팅될 수 있으므로 long으로 명시적 변환
+        hidden_states = self.embed_tokens(input_ids.long())
 
-        seq_len = input_ids.shape[1]
-        position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
+        # RoPE (cos, sin) 계산 — 모든 Transformer Block에서 공유
+        seq_len = hidden_states.shape[1]
+        position_ids = torch.arange(
+            seq_len, device=hidden_states.device
+        ).unsqueeze(0)
+        cos, sin = self.rotary_emb(hidden_states, position_ids)
 
-        # ✅ 여기서 (cos, sin) 생성
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        # ✅ 다음 stage로 같이 넘김
-        return hidden_states, position_ids, position_embeddings
+        return (hidden_states, cos, sin)
 
 
 class TransformerBlockLayer(nn.Module):
+    """하나의 Transformer Decoder Block (파이프라인 중간 스테이지)"""
+
     def __init__(self, decoder_layer):
         super().__init__()
         self.decoder_layer = decoder_layer
 
     def forward(self, inputs):
-        hidden_states, position_ids, position_embeddings = inputs
+        # 이전 레이어에서 전달받은 튜플 언패킹
+        hidden_states, cos, sin = inputs
 
-        out = self.decoder_layer(
+        output = self.decoder_layer(
             hidden_states,
-            position_ids=position_ids,
-            position_embeddings=position_embeddings,  # ✅ 반드시 전달
+            position_embeddings=(cos, sin),
         )
-        return out[0], position_ids, position_embeddings
+        # hidden_states를 갱신하고, cos/sin은 그대로 다음 레이어로 전달
+        return (output[0], cos, sin)
+
 
 class NormLMHeadLayer(nn.Module):
+    """Final LayerNorm + LM Head (파이프라인 마지막 스테이지)"""
+
     def __init__(self, norm, lm_head):
         super().__init__()
         self.norm = norm
         self.lm_head = lm_head
 
     def forward(self, inputs):
-        hidden_states, position_ids, position_embeddings = inputs
+        # cos, sin은 더 이상 필요 없으므로 버림
+        hidden_states, cos, sin = inputs
         hidden_states = self.norm(hidden_states)
-        logits = self.lm_head(hidden_states)
-        return logits
+        return self.lm_head(hidden_states)
 
 
 # ============================================================
@@ -135,12 +148,13 @@ class NormLMHeadLayer(nn.Module):
 #   → 총 34개 레이어 → DeepSpeed가 num_stages개 GPU에 자동 분배
 # ============================================================
 
-def get_sequential_layers(base):
+def get_sequential_layers(model):
     layers = []
-    layers.append(EmbeddingLayer(base.embed_tokens, rotary_emb))
-    for block in base.model.layers:
+    # EmbeddingLayer에 rotary_emb도 함께 전달 (LlamaModel 상위에 위치)
+    layers.append(EmbeddingLayer(model.model.embed_tokens, model.model.rotary_emb))
+    for block in model.model.layers:
         layers.append(TransformerBlockLayer(block))
-    layers.append(NormLMHeadLayer(base.model.norm, base.lm_head))
+    layers.append(NormLMHeadLayer(model.model.norm, model.lm_head))
     return layers
 
 
@@ -258,16 +272,6 @@ def main():
         torch_dtype=torch.bfloat16,
     )
 
-    base = model.model if hasattr(model, "model") else model
-
-    # ✅ rotary_emb 후보 찾기
-    if hasattr(base, "rotary_emb"):
-        rotary_emb = base.rotary_emb
-    elif hasattr(base, "model") and hasattr(base.model, "rotary_emb"):
-        rotary_emb = base.model.rotary_emb
-    else:
-        raise RuntimeError("rotary_emb를 모델에서 찾을 수 없습니다. dir(model/model.model)로 확인 필요")
-
     # --- 모델을 Sequential Layer 리스트로 분해 ---
     layers = get_sequential_layers(model)
     del model  # 원본 모델 메모리 해제
@@ -312,4 +316,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

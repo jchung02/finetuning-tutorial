@@ -1,4 +1,4 @@
-# Run     : accelerate launch --config_file configs/deepspeed_zero3.yaml multi-gpu/parallelism_accelerate.py
+# Run : accelerate launch --config_file configs/deepspeed_zero3.yaml multi-gpu/parallelism_accelerate.py
 
 compute_environment: LOCAL_MACHINE
 distributed_type: DEEPSPEED

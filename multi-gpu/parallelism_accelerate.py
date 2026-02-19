@@ -1,10 +1,10 @@
 """
 Fine-tune Llama-3.1-8B with HuggingFace Accelerate
-Run         : accelerate launch --config_file configs/single_gpu.yaml        multi-gpu/parallelism_accelerate.py
-              accelerate launch --config_file configs/ddp_2gpu.yaml          multi-gpu/parallelism_accelerate.py
-              accelerate launch --config_file configs/fsdp_zero3.yaml        multi-gpu/parallelism_accelerate.py
-              accelerate launch --config_file configs/deepspeed_zero2.yaml   multi-gpu/parallelism_accelerate.py
-              accelerate launch --config_file configs/deepspeed_zero3.yaml   multi-gpu/parallelism_accelerate.py
+Run : accelerate launch --config_file configs/single_gpu.yaml        multi-gpu/parallelism_accelerate.py
+      accelerate launch --config_file configs/ddp_2gpu.yaml          multi-gpu/parallelism_accelerate.py
+      accelerate launch --config_file configs/fsdp_zero3.yaml        multi-gpu/parallelism_accelerate.py
+      accelerate launch --config_file configs/deepspeed_zero2.yaml   multi-gpu/parallelism_accelerate.py
+      accelerate launch --config_file configs/deepspeed_zero3.yaml   multi-gpu/parallelism_accelerate.py
 """
 
 import os
@@ -38,15 +38,15 @@ LOG_STEPS     = 5
 OUTPUT_DIR    = "./outputs/parallelism_accelerate"
 
 accelerator = Accelerator(
-    gradient_accumulation_steps=GRAD_ACCUM,  # tells accumulate() when to sync gradients
-    log_with="tensorboard",                  # OPTIONAL: swap for "wandb" if preferred
+    gradient_accumulation_steps=GRAD_ACCUM,  
+    log_with="tensorboard",                  
     project_dir=OUTPUT_DIR,
 )
 
 accelerator.print("\n" + "=" * 60)
 accelerator.print("ACCELERATE STATE")
 accelerator.print("=" * 60)
-accelerator.print(accelerator.state)          # shows: distributed_type, mixed_precision, num_processes, etc.
+accelerator.print(accelerator.state)          
 accelerator.print("=" * 60 + "\n")
 
 
@@ -81,8 +81,7 @@ def preprocess(dataset):
         texts.append(text)
     return Dataset.from_dict({"text": texts})
 
-# Only load data on the main process first, then all processes access it.
-# This avoids every GPU reading the file simultaneously.
+# load data on the main process first, then all processes access it.
 with accelerator.main_process_first():
     train_hf_dataset, eval_hf_dataset = load_alpaca_dataset()
 
@@ -92,15 +91,12 @@ accelerator.print(f"Train examples: {len(train_hf_dataset):,}  |  Eval examples:
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 tokenizer.pad_token = tokenizer.eos_token  # Llama has no pad token by default
 
-
-# Instead of padding every sequence to MAX_SEQ_LEN, concatenate all token IDs into one long stream and slice fixed-length chunks
 def pack(hf_dataset, max_seq_len=MAX_SEQ_LEN):
     """
     Tokenize all examples, concatenate into one token stream, then slice into
     fixed-length (max_seq_len) chunks. Each chunk becomes one training example.
     Labels are shifted by 1 (next-token prediction).
     """
-    # Tokenize without padding — we want the raw token IDs
     all_token_ids = []
     for text in hf_dataset["text"]:
         ids = tokenizer(text, add_special_tokens=False)["input_ids"]
@@ -152,7 +148,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9, 0.999), eps
 
 # Total optimizer steps = epochs × (batches / grad_accum) — Accelerate handles the division
 total_steps = EPOCHS * (len(train_dataloader) // GRAD_ACCUM)
-warmup_steps = int(0.1 * total_steps)  # 0.1 treated as a ratio → 10 % warmup
+warmup_steps = int(0.1 * total_steps) 
 
 scheduler = get_cosine_schedule_with_warmup(
     optimizer,
@@ -160,8 +156,6 @@ scheduler = get_cosine_schedule_with_warmup(
     num_training_steps=total_steps,
 )
 
-# wraps model, optimizer, and dataloaders for whatever parallelism strategy is specified in the YAML (DDP / FSDP / DeepSpeed).
-# From here on, your code is the same for every strategy.
 model, optimizer, train_dataloader, eval_dataloader, scheduler = accelerator.prepare(
     model, optimizer, train_dataloader, eval_dataloader, scheduler
 )
@@ -172,7 +166,6 @@ accelerator.print(f"Total optimizer steps: {total_steps}  |  Warmup steps: {warm
 
 
 def evaluate():
-    """Run one pass over the eval set and return average loss (rank-0 only)."""
     model.eval()
     total_loss = torch.tensor(0.0, device=accelerator.device)
     total_steps = torch.tensor(0, device=accelerator.device)
@@ -183,7 +176,7 @@ def evaluate():
             total_loss  += outputs.loss.detach()
             total_steps += 1
 
-    # All-reduce so every process has the global sum
+    # All-reduce: every process has the global sum
     total_loss  = accelerator.reduce(total_loss,  reduction="sum")
     total_steps = accelerator.reduce(total_steps, reduction="sum")
     avg_loss = (total_loss / total_steps).item()
@@ -198,13 +191,11 @@ for epoch in range(EPOCHS):
     progress = tqdm(train_dataloader, disable=not accelerator.is_local_main_process)
 
     for batch in progress:
-        # accelerator.accumulate() to handle gradient accumulation
         with accelerator.accumulate(model):
             outputs = model(**batch)
             loss = outputs.loss
 
-            # For DeepSpeed it calls engine.backward(); for FSDP/DDP it calls the standard backward
-            accelerator.backward(loss)
+            accelerator.backward(loss) # For DeepSpeed it calls engine.backward()
 
             optimizer.step()
             scheduler.step()      # no-op on accumulation steps (Accelerate handles this)

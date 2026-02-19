@@ -1,6 +1,7 @@
 {
     "version": "0.2.0",
     "configurations": [
+
     
         {
             "name": "Multi-GPU: torchrun (4 GPUs)",
@@ -26,6 +27,32 @@
             ],
             "console": "integratedTerminal",
             "justMyCode": false
-        }
+        },
+        {
+            "name": "Multi-GPU: Pipeline Parallelism deepspeed",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "deepspeed.launcher.runner",
+            "args": [
+                "--num_gpus=4",
+                "multi-gpu/pp_deepspeed.py"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "subProcess": true
+        },
+        {
+            "name": "Multi-GPU: torchrun pipeline (4 GPUs)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "torch.distributed.run",
+            "args": [
+                "--nproc_per_node=4",
+                "${workspaceFolder}/multi-gpu/pp_torch2.py"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+
     ]
 }

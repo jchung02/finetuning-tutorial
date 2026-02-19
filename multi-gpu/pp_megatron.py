@@ -1,9 +1,6 @@
 """
-Description : Pipeline-parallel training of Llama-3.1-8B with Megatron-Core's 1F1B schedule.
-Key concepts: parallel_state, TransformerConfig, GPTModel pre_process/post_process flags,
-              get_forward_backward_func → 1F1B, forward_step_func contract.
+Pipeline-parallel training of Llama-3.1-8B with Megatron-Core's 1F1B schedule.
 Run         : torchrun --nproc_per_node=4 multi-gpu/pp_megatron.py
-Requirements: see # Requirements block below
 """
 
 # Requirements:
@@ -25,18 +22,14 @@ Requirements: see # Requirements block below
 #            https://github.com/NVIDIA/Megatron-LM/blob/core_v0.12.0/examples/run_simple_mcore_train_loop.py
 
 
-# === IMPORTS ===
-# 1. stdlib
 import os
 from functools import partial
 
-# 2. torch
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 
-# 3. Megatron-Core
 from megatron.core import parallel_state
 from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
@@ -72,7 +65,6 @@ OUTPUT_DIR       = "./outputs/pp_megatron"
 SEED             = 42
 
 
-# === SECTION 0: DISTRIBUTED INIT ===
 def initialize_distributed(num_stages=NUM_STAGES):
     """
     Set up PyTorch distributed and Megatron-Core's parallel process groups.

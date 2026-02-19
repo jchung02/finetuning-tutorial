@@ -21,7 +21,6 @@ from deepspeed.pipe import PipelineModule, LayerSpec
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import Dataset
 
-
 # === CONFIG ===
 MODEL_NAME  = "meta-llama/Meta-Llama-3.1-8B"
 DATA_PATH   = "alpaca_gpt4_data.json"
@@ -35,8 +34,6 @@ EPOCHS      = 3
 LOG_STEPS   = 5
 OUTPUT_DIR  = "./outputs/pp_deepspeed"
 
-
-# === DATA ===
 def load_alpaca_dataset(path=DATA_PATH, eval_size=1000):
     with open(path) as f:
         data = json.load(f)
@@ -65,15 +62,14 @@ def preprocess(dataset):
 
 def pack(tokenizer, hf_dataset, max_seq_len=MAX_SEQ_LEN):
     """
-    Flatten all examples into one long token stream, then slice into
-    fixed-length chunks of max_seq_len tokens.
+    Flatten all examples into one long token stream, then slice into fixed-length chunks of max_seq_len tokens.
     input_ids = chunk[:-1], labels = chunk[1:] — already shifted by 1 for next-token prediction.
     No padding needed — every chunk is exactly max_seq_len tokens long.
     """
     all_ids = []
     for text in hf_dataset["text"]:
         ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-        ids.append(tokenizer.eos_token_id)  # mark the boundary between examples
+        ids.append(tokenizer.eos_token_id)
         all_ids.extend(ids)
 
     packed = []
@@ -104,15 +100,6 @@ class PackedDataset(torch.utils.data.Dataset):
         labels    = torch.tensor(item["labels"],    dtype=torch.long)
         return input_ids, labels   # (inputs, labels) — the pipeline contract
 
-
-# === MODEL CACHE ===
-# When DeepSpeed builds a PipelineModule, it calls LayerSpec.build() — i.e. cls(*args) —
-# ONLY on the rank(s) that host each layer. By passing model_name + layer_idx as
-# constructor args (picklable), each rank loads the base model exactly ONCE via this
-# shared cache, regardless of how many layers that rank hosts. After PipelineModule
-# construction, call _free_model_cache() to reclaim the CPU RAM — the layer objects
-# extracted by each wrapper instance remain alive because those wrappers hold
-# Python references to them.
 _MODEL_CACHE: dict = {}
 
 def _get_or_load_model(model_name: str) -> AutoModelForCausalLM:
@@ -124,11 +111,9 @@ def _get_or_load_model(model_name: str) -> AutoModelForCausalLM:
             model_name,
             dtype=torch.bfloat16,
             attn_implementation="sdpa",
-            low_cpu_mem_usage=True,   # stream weight tensors one-by-one to cap peak CPU RAM
+            low_cpu_mem_usage=True,  
         )
-        # Untie embed_tokens ↔ lm_head before splitting across stages.
-        # Llama ties these by default (tie_word_embeddings=True) to save memory.
-        # After partitioning they live on different GPUs — independent copies are required.
+
         if m.config.tie_word_embeddings:
             m.lm_head.weight = nn.Parameter(m.lm_head.weight.detach().clone())
         _MODEL_CACHE[model_name] = m
@@ -145,29 +130,6 @@ def _free_model_cache():
     gc.collect()
     print(f"[rank {dist.get_rank()}] Model cache freed — only stage layers remain in CPU memory.")
 
-
-# === PIPELINE STAGE DEFINITIONS ===
-# DeepSpeed's PipelineModule treats the model as a flat sequence of nn.Module layers.
-# It partitions this sequence across NUM_STAGES GPUs and orchestrates a GPipe-style
-# micro-batch schedule:
-#
-#   Micro-batch  │  Stage 0   Stage 1   Stage 2   Stage 3
-#   ─────────────┼──────────────────────────────────────────
-#   mb 0 forward │  F0  →     F0  →     F0  →     F0 → loss
-#   mb 1 forward │  F1  →     F1  →     F1  →     F1 → loss
-#   ...
-#   mb 7 backward│  B7  ←     B7  ←     B7  ←     B7
-#   optimizer    │ ──────────── step ─────────────────────
-#
-# Only hidden_states flow between stages; attention masks and position_ids are
-# reconstructed locally inside each wrapper to avoid extra inter-stage communication.
-#
-# Layer layout for Llama-3.1-8B (32 decoder layers) across 4 stages:
-#   Stage 0 : EmbeddingStage  + layers[ 0.. 7]   (9 modules)
-#   Stage 1 : layers[ 8..15]                      (8 modules)
-#   Stage 2 : layers[16..23]                      (8 modules)
-#   Stage 3 : layers[24..31] + FinalNormAndLMHead (9 modules)
-
 class EmbeddingStage(nn.Module):
     """
     First pipeline stage — token IDs → dense hidden states.
@@ -176,7 +138,6 @@ class EmbeddingStage(nn.Module):
     """
     def __init__(self, model_name):
         super().__init__()
-        # _get_or_load_model hits the cache on all but the first call on this rank
         self.embed_tokens = _get_or_load_model(model_name).model.embed_tokens
 
     def forward(self, input_ids):
@@ -197,38 +158,31 @@ class LlamaLayerWrapper(nn.Module):
         3. Computes rotary position embeddings (cos, sin) via self.rotary_emb.
         4. Passes attention_mask=None (valid for packed sequences with no padding).
         5. Extracts and returns only hidden_states from the output tuple.
-    Constructor args are picklable (model_name: str, layer_idx: int).
 
-    Note on position_embeddings vs position_ids:
-        Transformers ≥ 4.45 refactored the Llama attention API. LlamaAttention.forward() no
-        longer computes RoPE internally from position_ids — it requires pre-computed
-        position_embeddings=(cos, sin) from the model-level rotary_emb module. Passing only
-        position_ids leaves position_embeddings=None, which causes a TypeError at runtime.
+    LlamaAttention.forward() no longer computes RoPE internally from position_ids 
+    — it requires pre-computed position_embeddings=(cos, sin) from the model-level rotary_emb module. 
     """
     def __init__(self, model_name, layer_idx):
         super().__init__()
         m = _get_or_load_model(model_name)
         self.layer      = m.model.layers[layer_idx]
-        self.rotary_emb = m.model.rotary_emb   # LlamaRotaryEmbedding; lives on this stage's GPU
+        self.rotary_emb = m.model.rotary_emb
 
     def forward(self, hidden_states):
-        seq_len      = hidden_states.shape[1]
-        position_ids = torch.arange(seq_len, device=hidden_states.device).unsqueeze(0)
-
-        # Compute (cos, sin) for this sequence length using the model's rotary embedding module.
-        # Required by LlamaAttention.forward() as of transformers 4.45+ — passing only
-        # position_ids no longer works because RoPE is now applied at the model level.
-        cos, sin = self.rotary_emb(hidden_states, position_ids)
-
-        # attention_mask=None → full (causal) attention across all tokens in the chunk.
-        # This is correct because packing removes padding — every token is real data.
+        B, S, _ = hidden_states.shape
+        device = hidden_states.device
+        
+        position_ids = torch.arange(S, device=device).unsqueeze(0).expand(B, -1) # (batch, seq_len)
+        
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
         outputs = self.layer(
             hidden_states,
             attention_mask=None,
-            position_embeddings=(cos, sin),
+            position_embeddings=position_embeddings,
         )
-        return outputs[0]   # LlamaDecoderLayer returns (hidden_states, *extras); keep only [0]
-
+        if isinstance(outputs, tuple):
+            return outputs[0]
+        return outputs
 
 class FinalNormAndLMHead(nn.Module):
     """
@@ -254,8 +208,7 @@ def loss_fn(logits, labels):
       logits  — output of FinalNormAndLMHead  (batch, seq_len, vocab_size)
       labels  — the labels tensor from the (inputs, labels) dataset tuple
 
-    pack() already shifts labels by 1: labels[i] = next token after input_ids[i].
-    No additional shifting is needed here — logits[i] and labels[i] are already aligned.
+    pack() shifts labels by 1: labels[i] = next token after input_ids[i].
     """
     return F.cross_entropy(
         logits.view(-1, logits.size(-1)),
@@ -265,8 +218,6 @@ def loss_fn(logits, labels):
 
 
 def main():
-    # === ARG PARSING ===
-    # The deepspeed launcher injects --local_rank into sys.argv; always parse it.
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="Injected automatically by the deepspeed launcher.")
@@ -284,7 +235,6 @@ def main():
     rank       = dist.get_rank()
     world_size = dist.get_world_size()
 
-    # === DATA ===
     if rank == 0:
         print("Loading dataset...")
     train_hf, _ = load_alpaca_dataset()
@@ -294,8 +244,6 @@ def main():
 
     train_packed  = pack(tokenizer, train_hf)
     train_dataset = PackedDataset(train_packed)
-
-    # Steps per epoch: each engine.train_batch() call consumes BATCH_SIZE × GRAD_ACCUM samples.
     steps_per_epoch = len(train_dataset) // (BATCH_SIZE * GRAD_ACCUM)
     total_steps     = EPOCHS * steps_per_epoch
     warmup_steps    = int(0.1 * total_steps)
@@ -303,12 +251,6 @@ def main():
     if rank == 0:
         print(f"Packed train chunks: {len(train_packed):,}  |  steps/epoch: {steps_per_epoch}")
 
-    # === MODEL LOADING ===
-    # Preload the base model into _MODEL_CACHE one rank at a time.
-    # This staggers disk I/O so ranks don't compete for CPU bandwidth simultaneously.
-    # Peak RAM note: earlier ranks keep their cache alive until _free_model_cache() below,
-    # so the peak across all ranks is still world_size × model_size in the worst case —
-    # but the staggering prevents simultaneous disk reads and reduces CPU saturation.
     if rank == 0:
         print("Loading model (staggered across ranks to reduce CPU I/O contention)...")
     for r in range(world_size):
@@ -316,10 +258,6 @@ def main():
             _get_or_load_model(MODEL_NAME)
         dist.barrier()   # rank r+1 begins loading only after rank r finishes
 
-    # === PIPELINE MODULE ===
-    # LayerSpec(cls, *args) stores only a class reference + picklable constructor args.
-    # PipelineModule calls LayerSpec.build() = cls(*args) ONLY on the rank that hosts
-    # each layer — so _get_or_load_model() is a cache hit (no re-download).
     pipeline_layers = (
         [LayerSpec(EmbeddingStage, MODEL_NAME)]
         + [LayerSpec(LlamaLayerWrapper, MODEL_NAME, i) for i in range(NUM_LAYERS)]
@@ -337,26 +275,9 @@ def main():
         partition_method="uniform",  # divide the layer list into equal-length chunks
     )
 
-    # All LayerSpecs for this rank have been built — release the base model cache.
-    # Each stage wrapper already holds its own reference to its extracted layer objects,
-    # so those tensors remain alive. Steady-state RAM drops from ~16 GB to ~2–3 GB per rank.
     _free_model_cache()
 
     # === DEEPSPEED CONFIG ===
-    # Inline dict is the default. Pass --ds_config to override with an external JSON file.
-    #
-    # train_batch_size = per_device_batch × dp_degree × grad_accum
-    #   per_device_batch (train_micro_batch_size_per_gpu) : samples per GPU per forward pass
-    #   dp_degree                                         : number of data-parallel replicas
-    #   grad_accum       (gradient_accumulation_steps)    : micro-batches before one optimizer step
-    #
-    # For pure pipeline parallelism (all GPUs in one pipeline, dp_degree = 1):
-    #   train_batch_size = 1 × 1 × 8 = 8
-    # For hybrid PP + DP (e.g. 8 GPUs, 4-stage pipeline, 2 dp replicas):
-    #   dp_degree = num_gpus / num_stages = 2  →  train_batch_size = 1 × 2 × 8 = 16
-    #
-    # DeepSpeed validates: train_batch_size == micro_batch × grad_accum × dp_world_size.
-    # Values MUST be consistent or DeepSpeed raises an assertion error.
     if args.ds_config:
         with open(args.ds_config) as f:
             config = json.load(f)
@@ -367,6 +288,13 @@ def main():
             "train_micro_batch_size_per_gpu": BATCH_SIZE,
             "gradient_accumulation_steps":    GRAD_ACCUM,
             "train_batch_size":               BATCH_SIZE * GRAD_ACCUM,   # dp_degree=1 → 1×8 = 8
+            "zero_optimization": {
+                "stage": 1, 
+                "offload_optimizer": {
+                    "device": "cpu",
+                    "pin_memory": True,
+                },
+            },
             "optimizer": {
                 "type": "AdamW",
                 "params": {
@@ -387,21 +315,12 @@ def main():
             },
             "bf16": {"enabled": True},
             "pipeline": {
-                "activation_checkpoint_interval": 0, # optional: set to 1 to checkpoint activations every layer
+                "activation_checkpoint_interval": 0, 
             },
             "steps_per_print":      LOG_STEPS,
             "wall_clock_breakdown": False,
         }
 
-    # === DEEPSPEED INITIALIZE ===
-    # deepspeed.initialize() wraps PipelineModule in a PipelineEngine that:
-    #   • assigns each LayerSpec to a GPU stage and moves its parameters there
-    #   • implements the GPipe schedule (forward all micro-batches, then backward all)
-    #   • manages gradient accumulation across GRAD_ACCUM micro-batches
-    #   • calls the optimizer only after all micro-batches are accumulated
-    #
-    # Passing training_data lets DeepSpeed build the DataLoader with a DistributedSampler
-    # matched to the data-parallel topology. engine.train_batch() takes no arguments.
     engine, _, _, _ = deepspeed.initialize(
         args=args,
         model=pipe_model,
@@ -414,13 +333,7 @@ def main():
               f"{BATCH_SIZE * GRAD_ACCUM} samples/step")
         print(f"Total optimizer steps: {total_steps}  (warmup: {warmup_steps})\n")
 
-    # === TRAINING LOOP ===
-    # engine.train_batch() encapsulates one complete optimizer step:
-    #   1. Fetches GRAD_ACCUM micro-batches from the internal DataLoader.
-    #   2. GPipe forward  — each micro-batch flows stage 0 → 1 → 2 → 3; loss_fn on stage 3.
-    #   3. GPipe backward — gradients flow stage 3 → 2 → 1 → 0 for each micro-batch.
-    #   4. Gradients accumulated over all micro-batches → optimizer.step() → zero_grad().
-    # Returns the average loss across the micro-batches (scalar tensor on the last rank).
+
     engine.train()
     global_step = 0
 
@@ -432,20 +345,14 @@ def main():
             loss = engine.train_batch()   # one full forward → backward → optimizer step
             global_step += 1
 
-            # Only rank 0 (first pipeline stage) prints — avoids duplicate lines.
+            # Only rank 0 (first pipeline stage) prints
             if rank == 0 and global_step % LOG_STEPS == 0:
                 print(f"  step {global_step:>5} | loss {loss.item():.4f}")
 
-        # Save a DeepSpeed checkpoint at the end of each epoch.
-        # Each GPU writes its own stage's weights + optimizer state + scheduler state.
         engine.save_checkpoint(OUTPUT_DIR, tag=f"epoch_{epoch + 1}")
         if rank == 0:
             print(f"  Checkpoint saved → {OUTPUT_DIR}/epoch_{epoch + 1}/")
 
-    # DeepSpeed pipeline checkpoints are sharded: each GPU saves its own stage weights.
-    # To produce a standard HuggingFace model from these shards:
-    #   1. Gather shards using zero_to_fp32.py or reassemble stage state_dicts manually.
-    #   2. Load the merged state dict into AutoModelForCausalLM and call save_pretrained().
     if rank == 0:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         print(f"\nTraining complete. DeepSpeed checkpoints at: {OUTPUT_DIR}/")

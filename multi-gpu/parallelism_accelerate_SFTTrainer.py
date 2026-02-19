@@ -31,14 +31,14 @@ from accelerate import Accelerator
 MODEL_NAME  = "meta-llama/Meta-Llama-3.1-8B"
 DATA_PATH   = "alpaca_gpt4_data.json"
 MAX_SEQ_LEN = 1024
-BATCH_SIZE  = 1       # per-device batch size
+BATCH_SIZE  = 1       
 GRAD_ACCUM  = 8       # effective batch = BATCH_SIZE × num_gpus × GRAD_ACCUM
 LR          = 3e-6
 EPOCHS      = 3
 LOG_STEPS   = 5
 OUTPUT_DIR  = "./outputs/parallelism_accelerate_SFTTrainer"
 
-accelerator = Accelerator() # just for logging the state; SFTTrainer will handle the rest internally
+accelerator = Accelerator() 
 
 accelerator.print("\n" + "=" * 60)
 accelerator.print("ACCELERATE STATE")
@@ -47,7 +47,6 @@ accelerator.print(accelerator.state)
 accelerator.print("=" * 60 + "\n")
 
 
-# === DATA ===
 def load_alpaca_dataset(path=DATA_PATH, eval_size=1000):
     """Load and split the Alpaca dataset, then format into prompt strings."""
     with open(path) as f:
@@ -79,15 +78,11 @@ def preprocess(dataset):
         texts.append(text)
     return Dataset.from_dict({"text": texts})
 
-# Only load data on the main process first, then all processes access it.
-# This avoids every GPU reading the file simultaneously.
 with accelerator.main_process_first():
     train_dataset, eval_dataset = load_alpaca_dataset()
 
 accelerator.print(f"Train examples: {len(train_dataset):,}  |  Eval examples: {len(eval_dataset):,}")
 
-
-# === MODEL & TOKENIZER ===
 accelerator.print(f"Loading model: {MODEL_NAME}")
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -99,51 +94,36 @@ model = AutoModelForCausalLM.from_pretrained(
     attn_implementation="flash_attention_2",
 )
 
-model.gradient_checkpointing_enable()     # optional
-
+model.gradient_checkpointing_enable()     
 
 # === TRAINING CONFIG ===
 sft_config = SFTConfig(
     output_dir=OUTPUT_DIR,
-
     per_device_train_batch_size=BATCH_SIZE,
-    gradient_accumulation_steps=GRAD_ACCUM,  # effective batch = BATCH_SIZE × num_gpus × GRAD_ACCUM
-    
+    gradient_accumulation_steps=GRAD_ACCUM, 
     bf16=True,
-
     learning_rate=LR,
     lr_scheduler_type="cosine",
     warmup_steps=0.1,                        
 
     num_train_epochs=EPOCHS,
-
     logging_steps=LOG_STEPS,
     logging_first_step=True,
     eval_strategy="epoch",
     save_strategy="epoch",
 
-    # --- SFT-specific: sequence packing ---
     packing=True,
     max_length=MAX_SEQ_LEN,
 
-    dataset_text_field="text",               # which column in the HuggingFace Dataset to use
+    dataset_text_field="text",               
 )
 
-
-# === TRAINER ===
-# SFTTrainer wraps Trainer and adds:
-#   - Sequence packing via ConstantLengthDataset (when packing=True)
-#   - PEFT / LoRA support (pass peft_config= to bolt on LoRA adapters)
-#
-# The parallelism strategy — DDP gradient sync, FSDP weight sharding, DeepSpeed ZeRO
-# offloading — is handled transparently by the Accelerate backend inside Trainer.
-# No manual accelerator.prepare() call is needed here.
 trainer = SFTTrainer(
     model=model,
     args=sft_config,
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
-    processing_class=tokenizer,             # tokenizes on the fly; replaces deprecated tokenizer= in newer TRL
+    processing_class=tokenizer,             # tokenizes on the fly
 )
 
 accelerator.print(
@@ -151,16 +131,8 @@ accelerator.print(
     f"grad_accum = {BATCH_SIZE * accelerator.num_processes * GRAD_ACCUM}\n"
 )
 
-
-# === TRAIN ===
 trainer.train()
 
-
-# === SAVE ===
-# trainer.save_model() is rank-aware — only rank 0 writes to disk by default.
-# For FSDP / DeepSpeed ZeRO-3, it first gathers the sharded weights from all ranks
-# before writing, so the full model lands in OUTPUT_DIR even when parameters were
-# distributed across GPUs. No manual unwrap_model() is needed here.
 trainer.save_model(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
 accelerator.print(f"\nModel saved to {OUTPUT_DIR}")
