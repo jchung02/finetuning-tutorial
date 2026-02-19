@@ -1,28 +1,19 @@
 """
-Description : Fine-tune Llama-3.1-8B with HuggingFace Accelerate — one script, any parallelism strategy.
-Key concepts: Accelerator init, accelerator.state inspection, prepare(), accumulate(),
-              accelerator.backward(), mixed precision, gradient accumulation, and model saving —
-              all identical regardless of whether you run DDP / FSDP / DeepSpeed ZeRO.
-Run         : accelerate launch --config_file configs/single_gpu.yaml       multi-gpu/parallelism_accelerate.py
+Fine-tune Llama-3.1-8B with HuggingFace Accelerate
+Run         : accelerate launch --config_file configs/single_gpu.yaml        multi-gpu/parallelism_accelerate.py
               accelerate launch --config_file configs/ddp_2gpu.yaml          multi-gpu/parallelism_accelerate.py
               accelerate launch --config_file configs/fsdp_zero3.yaml        multi-gpu/parallelism_accelerate.py
               accelerate launch --config_file configs/deepspeed_zero2.yaml   multi-gpu/parallelism_accelerate.py
               accelerate launch --config_file configs/deepspeed_zero3.yaml   multi-gpu/parallelism_accelerate.py
-Requirements: pip install accelerate transformers datasets torch tqdm
-              For DeepSpeed configs: pip install deepspeed
 """
 
-# === IMPORTS ===
-# 1. stdlib
 import os
 import json
 import random
 
-# 2. torch
 import torch
 from torch.utils.data import DataLoader
 
-# 3. HuggingFace
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -31,14 +22,13 @@ from transformers import (
 )
 from datasets import Dataset
 
-# 4. Accelerate — the only library that changes between parallelism strategies is the config YAML
 from accelerate import Accelerator
 from tqdm.auto import tqdm
 
 
 # === CONFIG ===
 MODEL_NAME    = "meta-llama/Meta-Llama-3.1-8B"
-DATA_PATH     = "alpaca_gpt4_data.json"   # relative to repo root (where you launch from)
+DATA_PATH     = "alpaca_gpt4_data.json"   
 MAX_SEQ_LEN   = 1024
 BATCH_SIZE    = 1                          # per-device batch size
 GRAD_ACCUM    = 8                          # effective batch = BATCH_SIZE × num_gpus × GRAD_ACCUM
@@ -47,18 +37,12 @@ EPOCHS        = 3
 LOG_STEPS     = 5
 OUTPUT_DIR    = "./outputs/parallelism_accelerate"
 
-
-# === SECTION 0: ACCELERATOR INIT & STATE INSPECTION ===
-# Accelerator reads your --config_file automatically — no code change needed between strategies.
-# mixed_precision, distributed_type, num_processes all come from the YAML.
 accelerator = Accelerator(
     gradient_accumulation_steps=GRAD_ACCUM,  # tells accumulate() when to sync gradients
     log_with="tensorboard",                  # OPTIONAL: swap for "wandb" if preferred
     project_dir=OUTPUT_DIR,
 )
 
-# Print parallelism details so students can verify the active strategy.
-# accelerator.print() is rank-aware: only rank 0 prints, so output is never duplicated.
 accelerator.print("\n" + "=" * 60)
 accelerator.print("ACCELERATE STATE")
 accelerator.print("=" * 60)
@@ -66,7 +50,6 @@ accelerator.print(accelerator.state)          # shows: distributed_type, mixed_p
 accelerator.print("=" * 60 + "\n")
 
 
-# === SECTION 1: DATA LOADING ===
 def load_alpaca_dataset(path=DATA_PATH, eval_size=1000):
     """Load and split the Alpaca dataset, then format into prompt strings."""
     with open(path) as f:
@@ -106,14 +89,11 @@ with accelerator.main_process_first():
 accelerator.print(f"Train examples: {len(train_hf_dataset):,}  |  Eval examples: {len(eval_hf_dataset):,}")
 
 
-# === SECTION 2: TOKENIZER ===
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 tokenizer.pad_token = tokenizer.eos_token  # Llama has no pad token by default
 
 
-# === SECTION 3: SEQUENCE PACKING ===
-# Instead of padding every sequence to MAX_SEQ_LEN (wasteful), we concatenate all
-# token IDs into one long stream and slice fixed-length chunks — no padding needed.
+# Instead of padding every sequence to MAX_SEQ_LEN, concatenate all token IDs into one long stream and slice fixed-length chunks
 def pack(hf_dataset, max_seq_len=MAX_SEQ_LEN):
     """
     Tokenize all examples, concatenate into one token stream, then slice into
@@ -146,10 +126,6 @@ with accelerator.main_process_first():
 
 accelerator.print(f"Packed train batches: {len(train_packed):,}  |  Packed eval batches: {len(eval_packed):,}")
 
-
-# === SECTION 4: DATALOADERS ===
-# default_data_collator stacks list-of-dicts into batched tensors — no extra work needed
-# because our pack() already produces fixed-length lists.
 train_dataloader = DataLoader(
     train_packed,
     batch_size=BATCH_SIZE,
@@ -163,22 +139,15 @@ eval_dataloader = DataLoader(
     collate_fn=default_data_collator,
 )
 
-
-# === SECTION 5: MODEL ===
-# Do NOT use device_map="auto" here — Accelerate (and DeepSpeed/FSDP) manages device placement.
-# Load in bf16 to match our configs; flash_attention_2 requires bf16.
 accelerator.print(f"Loading model: {MODEL_NAME}")
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_NAME,
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16, # flash_attention_2 requires bf16
     attn_implementation="flash_attention_2",
 )
 
-# OPTIONAL: gradient checkpointing trades compute for memory (recomputes activations on backward)
-model.gradient_checkpointing_enable()
+model.gradient_checkpointing_enable() # optional
 
-
-# === SECTION 6: OPTIMIZER & SCHEDULER ===
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9, 0.999), eps=1e-8)
 
 # Total optimizer steps = epochs × (batches / grad_accum) — Accelerate handles the division
@@ -191,10 +160,7 @@ scheduler = get_cosine_schedule_with_warmup(
     num_training_steps=total_steps,
 )
 
-
-# === SECTION 7: PREPARE WITH ACCELERATE ===
-# This is THE key Accelerate call — it wraps model, optimizer, and dataloaders for
-# whatever parallelism strategy is specified in the YAML (DDP / FSDP / DeepSpeed).
+# wraps model, optimizer, and dataloaders for whatever parallelism strategy is specified in the YAML (DDP / FSDP / DeepSpeed).
 # From here on, your code is the same for every strategy.
 model, optimizer, train_dataloader, eval_dataloader, scheduler = accelerator.prepare(
     model, optimizer, train_dataloader, eval_dataloader, scheduler
@@ -205,7 +171,6 @@ accelerator.print(f"\nEffective batch size: {BATCH_SIZE} × {accelerator.num_pro
 accelerator.print(f"Total optimizer steps: {total_steps}  |  Warmup steps: {warmup_steps}\n")
 
 
-# === SECTION 8: TRAINING LOOP ===
 def evaluate():
     """Run one pass over the eval set and return average loss (rank-0 only)."""
     model.eval()
@@ -225,7 +190,6 @@ def evaluate():
     model.train()
     return avg_loss
 
-
 model.train()
 global_step = 0
 
@@ -234,16 +198,12 @@ for epoch in range(EPOCHS):
     progress = tqdm(train_dataloader, disable=not accelerator.is_local_main_process)
 
     for batch in progress:
-        # accelerator.accumulate() is the clean way to handle gradient accumulation.
-        # It automatically:
-        #   • skips gradient sync across processes until GRAD_ACCUM steps are done (saves bandwidth)
-        #   • makes optimizer.step() a no-op on accumulation steps (only steps when sync happens)
+        # accelerator.accumulate() to handle gradient accumulation
         with accelerator.accumulate(model):
             outputs = model(**batch)
             loss = outputs.loss
 
-            # accelerator.backward() replaces loss.backward().
-            # For DeepSpeed it calls engine.backward(); for FSDP/DDP it calls the standard backward.
+            # For DeepSpeed it calls engine.backward(); for FSDP/DDP it calls the standard backward
             accelerator.backward(loss)
 
             optimizer.step()
@@ -258,7 +218,6 @@ for epoch in range(EPOCHS):
             if global_step % LOG_STEPS == 0:
                 accelerator.print(f"  step {global_step:>5} | loss {loss.detach().item():.4f} | lr {scheduler.get_last_lr()[0]:.2e}")
 
-    # --- End of epoch: evaluate ---
     eval_loss = evaluate()
     accelerator.print(f"  >> Epoch {epoch + 1} eval loss: {eval_loss:.4f}")
 
@@ -266,9 +225,7 @@ for epoch in range(EPOCHS):
     accelerator.wait_for_everyone()
 
 
-# === SECTION 9: SAVE ===
-# accelerator.unwrap_model() strips away DDP / FSDP / DeepSpeed wrappers and
-# returns the raw HuggingFace model, which we can then save normally.
+# accelerator.unwrap_model() strips away DDP / FSDP / DeepSpeed wrappers and returns the raw HuggingFace model, which we can then save normally.
 accelerator.wait_for_everyone()
 
 if accelerator.is_main_process:
@@ -286,6 +243,4 @@ accelerator.end_training()
 
 
 if __name__ == "__main__":
-    # `accelerate launch` calls this file as a module, so __main__ is reached normally.
-    # Nothing extra needed here — all setup happens at module level above.
     pass

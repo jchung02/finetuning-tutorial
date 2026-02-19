@@ -1,14 +1,14 @@
-# Single GPU training — full model on one device.
-# Run: accelerate launch --config_file configs/single_gpu.yaml multi-gpu/parallelism_accelerate.py
+# Run: accelerate launch --config_file configs/ddp_4gpu.yaml multi-gpu/parallelism_accelerate.py
 
 compute_environment: LOCAL_MACHINE
-distributed_type: NO
+distributed_type: MULTI_GPU
 mixed_precision: bf16
-num_processes: 1
+num_processes: 4
 num_machines: 1
 machine_rank: 0
 main_training_function: main
 downcast_bf16: 'no'
 enable_cpu_affinity: false
 gpu_ids: all
+same_network: true
 use_cpu: false

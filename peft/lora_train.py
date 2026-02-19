@@ -1,25 +1,19 @@
 """
-Description : Fine-tune Llama-3.1-8B with LoRA and QLoRA using HuggingFace PEFT.
-Key concepts: LoraConfig, get_peft_model, BitsAndBytesConfig (4-bit), adapter save/load/merge.
+Fine-tune Llama-3.1-8B with LoRA and QLoRA using HuggingFace PEFT.
 Run         : python peft/lora_train.py
 Requirements: pip install transformers datasets trl peft bitsandbytes torch
 """
 
-# === IMPORTS ===
-# 1. stdlib
 import os
 import json
 import random
 
-# 2. torch
 import torch
 
-# 3. HuggingFace
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from datasets import Dataset
 from trl import SFTTrainer, SFTConfig
 
-# 4. PEFT
 from peft import LoraConfig, get_peft_model, PeftModel
 
 
@@ -64,24 +58,6 @@ def preprocess(dataset):
 train_dataset, eval_dataset = load_alpaca_dataset()
 
 
-# ==============================================================================
-# SECTION 1 — LoRA: LOW-RANK ADAPTATION
-# ==============================================================================
-#
-# Problem: Full fine-tuning updates every parameter in the model (7B+ weights).
-#          This is slow, memory-heavy, and risks overwriting pretrained knowledge.
-#
-# LoRA solution: Freeze the original weights. For each chosen linear layer W,
-# add two small trainable matrices A (d × r) and B (r × d) such that the
-# effective weight update is ΔW = B × A. Because r ≪ d, the number of
-# trainable parameters drops by 100-1000×.
-#
-#   W_new  =  W_frozen  +  B × A
-#              (no grad)   (trained)
-#
-# At inference, B×A can be merged back into W so there is zero latency overhead.
-# ==============================================================================
-
 print("\n" + "=" * 60)
 print("SECTION 1: LoRA")
 print("=" * 60)
@@ -116,8 +92,7 @@ tokenizer.pad_token = tokenizer.eos_token   # Llama has no pad token by default
 #     Increases trainable params ~2-3× vs attention-only.
 
 lora_config = LoraConfig(
-    r=16,               # rank: size of the low-rank bottleneck; higher r = more capacity
-                        # but more parameters. Typical range: 8–64.
+    r=16,               # rank: size of the low-rank bottleneck; higher r = more capacity but more parameters. Typical range: 8–64.
     lora_alpha=32,      # scaling factor applied to ΔW = (alpha/r) × B×A.
                         # Rule of thumb: set alpha = 2×r so the effective scale stays ~1.
     lora_dropout=0.05,  # dropout applied to the LoRA path during training to reduce
@@ -125,20 +100,18 @@ lora_config = LoraConfig(
     bias="none",        # whether to train bias terms alongside LoRA; "none" is standard
     task_type="CAUSAL_LM",
 
-    # Full attention projection matrices — good default for instruction fine-tuning
+    # Full attention projection matrices
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
 )
 
 # --- 1c. Wrap the base model with LoRA adapters ---
-# get_peft_model() freezes all original weights and injects trainable A/B matrices
-# into the specified target_modules. The rest of the model is unchanged.
+# get_peft_model() freezes all original weights and injects trainable A/B matrices into the specified target_modules. 
+# The rest of the model is unchanged.
 lora_model = get_peft_model(base_model, lora_config)
 
-# print_trainable_parameters() shows how many params are actually updated
-lora_model.print_trainable_parameters()
-# Example output: trainable params: 20,971,520 || all params: 8,051,232,768 || trainable%: 0.26
+lora_model.print_trainable_parameters() # shows how many params are actually updated
 
-# --- 1d. Train with SFTTrainer (same API as full fine-tune — LoRA is transparent) ---
+# --- 1d. Train with SFTTrainer ---
 lora_output_dir = "./outputs/lora_adapter"
 
 lora_trainer = SFTTrainer(
@@ -166,24 +139,6 @@ lora_trainer = SFTTrainer(
 lora_trainer.train()
 
 
-# ==============================================================================
-# SECTION 2 — QLoRA: QUANTIZED LOW-RANK ADAPTATION
-# ==============================================================================
-#
-# Problem: Even LoRA requires the frozen base model in bf16/fp16 (~14 GB for 7B).
-#          Consumer GPUs often have only 8–24 GB VRAM.
-#
-# QLoRA solution (Dettmers et al., 2023):
-#   1. Load the base model in 4-bit NormalFloat (NF4) — ~4 GB for 7B params.
-#      NF4 is information-theoretically optimal for normally-distributed weights.
-#   2. Use double quantization: quantize the quantization constants themselves,
-#      saving another ~0.4 bits/param.
-#   3. Apply LoRA adapters on top in bf16 — adapters stay in full precision,
-#      gradients are computed in bf16, base weights never leave 4-bit.
-#
-# Net result: fine-tune a 7B model on a single 16 GB GPU with minimal accuracy loss.
-# ==============================================================================
-
 print("\n" + "=" * 60)
 print("SECTION 2: QLoRA (4-bit quantization + LoRA)")
 print("=" * 60)
@@ -205,15 +160,13 @@ qlora_base_model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",                          # required when using bitsandbytes quantization
 )
 
-# prepare_model_for_kbit_training() is no longer needed in recent PEFT versions —
 # gradient checkpointing and layer casting are handled automatically.
 # OPTIONAL: uncomment if you encounter dtype issues with older PEFT (<0.7):
 # from peft import prepare_model_for_kbit_training
 # qlora_base_model = prepare_model_for_kbit_training(qlora_base_model)
 
 # --- 2c. LoRA config for QLoRA ---
-# r can often be raised compared to LoRA because the 4-bit base model gives back
-# enough VRAM headroom. Including MLP layers is common in QLoRA papers.
+# r can often be raised compared to LoRA because the 4-bit base model gives back enough VRAM headroom. 
 qlora_config = LoraConfig(
     r=64,               # higher rank affordable because base model is 4-bit (saves ~10 GB)
     lora_alpha=128,     # keep alpha = 2×r
@@ -257,20 +210,6 @@ qlora_trainer = SFTTrainer(
 
 qlora_trainer.train()
 
-
-# ==============================================================================
-# SECTION 3 — ADAPTER LIFECYCLE: SAVE / LOAD / MERGE
-# ==============================================================================
-#
-# After training, you have two independent artifacts:
-#   • The frozen base model   (unchanged; can be shared across many adapters)
-#   • The LoRA adapter        (tiny; ~20-200 MB vs 14 GB for the full model)
-#
-# This separation is the key operational advantage of PEFT:
-#   - Store / version / swap adapters without touching the base model.
-#   - Merge for zero-latency inference when you no longer need to swap.
-# ==============================================================================
-
 print("\n" + "=" * 60)
 print("SECTION 3: Adapter Lifecycle — Save / Load / Merge")
 print("=" * 60)
@@ -285,7 +224,6 @@ print(f"Adapter saved to: {adapter_save_path}")
 print(f"Files: {os.listdir(adapter_save_path)}")
 
 # --- 3b. LOAD: reload the base model and attach the saved adapter ---
-# This is how you resume inference or continue training from a saved adapter.
 print("\nLoading adapter onto a fresh base model...")
 
 reload_base = AutoModelForCausalLM.from_pretrained(
@@ -295,8 +233,7 @@ reload_base = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
 )
 
-# PeftModel.from_pretrained() reads adapter_config.json, injects the LoRA matrices,
-# and loads the saved adapter weights — base model weights remain frozen.
+# PeftModel.from_pretrained() reads adapter_config.json, injects the LoRA matrices, and loads the saved adapter weights — base model weights remain frozen.
 loaded_peft_model = PeftModel.from_pretrained(reload_base, adapter_save_path)
 loaded_peft_model.eval()
 print("Adapter loaded successfully.")
@@ -306,12 +243,12 @@ print("Adapter loaded successfully.")
 # loaded_peft_model.set_adapter("v2")
 
 # --- 3c. MERGE: fuse adapter weights into the base model for zero-latency inference ---
-# merge_and_unload() computes W_new = W_frozen + (alpha/r) × B×A for every adapted
-# layer, writes the result back into the base model, and removes the adapter scaffolding.
+# merge_and_unload() computes W_new = W_frozen + (alpha/r) × B×A for every adapted layer, 
+# writes the result back into the base model, and removes the adapter scaffolding.
 # After merging:
-#   ✓ No LoRA overhead at inference — standard transformer forward pass
-#   ✓ Can be saved as a regular HuggingFace model and shared on the Hub
-#   ✗ Adapter is no longer separable; you cannot swap or fine-tune the adapter further
+#   No LoRA overhead at inference — standard transformer forward pass
+#   Can be saved as a regular HuggingFace model and shared on the Hub
+#   Adapter is no longer separable
 print("\nMerging adapter weights into the base model...")
 merged_model = loaded_peft_model.merge_and_unload()
 

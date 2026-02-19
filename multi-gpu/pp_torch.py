@@ -1,4 +1,4 @@
-# $ torchrun --nproc-per-node 4 pippy_llama.py
+# $ torchrun --nproc-per-node 4 multi-gpu/pp_torch.py
 import os
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer

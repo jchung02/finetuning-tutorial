@@ -1,12 +1,8 @@
-# Use case: DeepSpeed ZeRO Stage 3 with CPU optimizer offload — shards parameters,
-#           gradients, AND optimizer states across GPUs, then offloads optimizer states
-#           to CPU. Maximum memory savings; enables training very large models on fewer GPUs.
-# Run: accelerate launch --config_file configs/deepspeed_zero3.yaml multi-gpu/parallelism_accelerate.py
+# Run     : accelerate launch --config_file configs/deepspeed_zero3.yaml multi-gpu/parallelism_accelerate.py
 
 compute_environment: LOCAL_MACHINE
 distributed_type: DEEPSPEED
-mixed_precision: bf16
-num_processes: 2
+num_processes: 4
 num_machines: 1
 machine_rank: 0
 main_training_function: main
@@ -17,10 +13,6 @@ same_network: true
 use_cpu: false
 
 deepspeed_config:
-  zero_stage: 3
-  gradient_accumulation_steps: 8
-  gradient_clipping: 1.0
-  offload_optimizer_device: cpu                # offload optimizer states (Adam moments) to CPU RAM
-  offload_param_device: none                   # OPTIONAL: set to 'cpu' to also offload parameters
-  zero3_init_flag: true                        # shard model during init (required for ZeRO-3)
-  zero3_save_16bit_model: true                 # reconstruct full fp16 model on rank 0 when saving
+  deepspeed_config_file: configs/ds_config.json  
+  zero3_init_flag: true   # shard weights at model.__init__ via deepspeed.zero.Init (required for ZeRO-3)
+

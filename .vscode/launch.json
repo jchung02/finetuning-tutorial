@@ -1,6 +1,7 @@
 {
     "version": "0.2.0",
     "configurations": [
+    
         {
             "name": "Multi-GPU: torchrun (4 GPUs)",
             "type": "debugpy",
@@ -9,6 +10,19 @@
             "args": [
                 "--nproc_per_node=4",
                 "${workspaceFolder}/multi-gpu/collective_operations.py"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Multi-GPU: accelerate (4 GPUs)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "accelerate.commands.launch",
+            "args": [
+                "--config_file",
+                "configs/deepspeed_zero3.yaml",
+                "multi-gpu/parallelism_accelerate.py"
             ],
             "console": "integratedTerminal",
             "justMyCode": false

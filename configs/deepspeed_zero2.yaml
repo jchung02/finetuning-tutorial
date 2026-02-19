@@ -1,12 +1,9 @@
-# Use case: DeepSpeed ZeRO Stage 2 — shards optimizer states and gradients across GPUs
-#           but keeps a full copy of model parameters on each GPU.
-#           Good balance between memory savings and communication overhead.
 # Run: accelerate launch --config_file configs/deepspeed_zero2.yaml multi-gpu/parallelism_accelerate.py
 
 compute_environment: LOCAL_MACHINE
 distributed_type: DEEPSPEED
 mixed_precision: bf16
-num_processes: 2
+num_processes: 4
 num_machines: 1
 machine_rank: 0
 main_training_function: main

@@ -1,12 +1,9 @@
-# Use case: Fully Sharded Data Parallel (FSDP) with FULL_SHARD — model parameters,
-#           gradients, and optimizer states are all sharded across GPUs.
-#           Equivalent to ZeRO-3 but implemented natively in PyTorch.
 # Run: accelerate launch --config_file configs/fsdp_zero3.yaml multi-gpu/parallelism_accelerate.py
 
 compute_environment: LOCAL_MACHINE
 distributed_type: FSDP
 mixed_precision: bf16
-num_processes: 2
+num_processes: 4
 num_machines: 1
 machine_rank: 0
 main_training_function: main
