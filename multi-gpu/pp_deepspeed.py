@@ -272,7 +272,7 @@ def main():
         layers=pipeline_layers,
         loss_fn=loss_fn,
         num_stages=NUM_STAGES,
-        partition_method="uniform",  # divide the layer list into equal-length chunks
+        partition_method="parameters",  # divide the layer list into equal-length chunks
     )
 
     _free_model_cache()
