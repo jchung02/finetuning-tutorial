@@ -4,7 +4,7 @@
 
     
         {
-            "name": "Multi-GPU: torchrun (4 GPUs)",
+            "name": "Multi-GPU: collective operations",
             "type": "debugpy",
             "request": "launch",
             "module": "torch.distributed.run",
@@ -16,7 +16,7 @@
             "justMyCode": false
         },
         {
-            "name": "Multi-GPU: accelerate (4 GPUs)",
+            "name": "Multi-GPU: parallelism accelerate",
             "type": "debugpy",
             "request": "launch",
             "module": "accelerate.commands.launch",

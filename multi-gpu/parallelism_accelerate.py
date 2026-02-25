@@ -1,7 +1,7 @@
 """
 Fine-tune Llama-3.1-8B with HuggingFace Accelerate
 Run : accelerate launch --config_file configs/single_gpu.yaml        multi-gpu/parallelism_accelerate.py
-      accelerate launch --config_file configs/ddp_2gpu.yaml          multi-gpu/parallelism_accelerate.py
+      accelerate launch --config_file configs/ddp_4gpu.yaml          multi-gpu/parallelism_accelerate.py
       accelerate launch --config_file configs/fsdp_zero3.yaml        multi-gpu/parallelism_accelerate.py
       accelerate launch --config_file configs/deepspeed_zero2.yaml   multi-gpu/parallelism_accelerate.py
       accelerate launch --config_file configs/deepspeed_zero3.yaml   multi-gpu/parallelism_accelerate.py
@@ -34,8 +34,10 @@ BATCH_SIZE    = 1                          # per-device batch size
 GRAD_ACCUM    = 8                          # effective batch = BATCH_SIZE × num_gpus × GRAD_ACCUM
 LR            = 3e-6
 EPOCHS        = 3
-LOG_STEPS     = 5
-OUTPUT_DIR    = "./outputs/parallelism_accelerate"
+LOG_STEPS        = 5
+OUTPUT_DIR       = "./outputs/parallelism_accelerate"
+CHECKPOINT_STEPS = 50   # save a full resumable checkpoint every N optimizer steps
+CHECKPOINT_DIR   = os.path.join(OUTPUT_DIR, "checkpoints2")
 
 accelerator = Accelerator(
     gradient_accumulation_steps=GRAD_ACCUM,  
@@ -164,6 +166,7 @@ accelerator.print(f"\nEffective batch size: {BATCH_SIZE} × {accelerator.num_pro
                   f"{BATCH_SIZE * accelerator.num_processes * GRAD_ACCUM}")
 accelerator.print(f"Total optimizer steps: {total_steps}  |  Warmup steps: {warmup_steps}\n")
 
+accelerator.init_trackers("train")
 
 def evaluate():
     model.eval()
@@ -185,6 +188,19 @@ def evaluate():
 
 model.train()
 global_step = 0
+
+# if os.path.isdir(CHECKPOINT_DIR) and os.listdir(CHECKPOINT_DIR):
+#     # Pick the latest checkpoint sub-folder 
+#     ckpt_folders = sorted(
+#         [d for d in os.listdir(CHECKPOINT_DIR) if d.startswith("step_")],
+#         key=lambda x: int(x.split("_")[1]),
+#     )
+#     if ckpt_folders:
+#         latest_ckpt = os.path.join(CHECKPOINT_DIR, ckpt_folders[-1])
+#         accelerator.print(f"Resuming from checkpoint: {latest_ckpt}")
+#         accelerator.load_state(latest_ckpt)
+#         # Recover the global step from the folder name so logging stays accurate
+#         global_step = int(ckpt_folders[-1].split("_")[1])
 
 for epoch in range(EPOCHS):
     accelerator.print(f"\n--- Epoch {epoch + 1} / {EPOCHS} ---")
@@ -208,9 +224,19 @@ for epoch in range(EPOCHS):
 
             if global_step % LOG_STEPS == 0:
                 accelerator.print(f"  step {global_step:>5} | loss {loss.detach().item():.4f} | lr {scheduler.get_last_lr()[0]:.2e}")
+                accelerator.log({"train/loss": loss.detach().item(), "train/lr": scheduler.get_last_lr()[0]}, step=global_step)
+
+            if global_step % CHECKPOINT_STEPS == 0:
+                ckpt_path = os.path.join(CHECKPOINT_DIR, f"step_{global_step}")
+                accelerator.save_state(ckpt_path)
+                accelerator.print(f"  [checkpoint] saved to {ckpt_path}")
 
     eval_loss = evaluate()
     accelerator.print(f"  >> Epoch {epoch + 1} eval loss: {eval_loss:.4f}")
+
+    epoch_ckpt_path = os.path.join(CHECKPOINT_DIR, f"step_{global_step}")
+    accelerator.save_state(epoch_ckpt_path)
+    accelerator.print(f"  [checkpoint] end-of-epoch {epoch + 1} saved to {epoch_ckpt_path}")
 
     # Sync all processes before next epoch
     accelerator.wait_for_everyone()

@@ -130,6 +130,7 @@ def _free_model_cache():
     gc.collect()
     print(f"[rank {dist.get_rank()}] Model cache freed — only stage layers remain in CPU memory.")
 
+
 class EmbeddingStage(nn.Module):
     """
     First pipeline stage — token IDs → dense hidden states.

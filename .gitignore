@@ -1,3 +1,6 @@
 logs/
 CLAUDE.md
 launch.json
+*.csv
+outputs/
+archive/

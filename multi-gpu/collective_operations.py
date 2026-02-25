@@ -23,6 +23,16 @@ init_process()
 # Run examples
 example_broadcast()
 
+'''
+Before broadcast on rank 0: tensor([1., 2., 3., 4., 5.], device='cuda:0')
+Before broadcast on rank 1: tensor([0., 0., 0., 0., 0.], device='cuda:1')
+Before broadcast on rank 2: tensor([0., 0., 0., 0., 0.], device='cuda:2')
+
+After broadcast on rank 0: tensor([1., 2., 3., 4., 5.], device='cuda:0')
+After broadcast on rank 1: tensor([1., 2., 3., 4., 5.], device='cuda:1')
+After broadcast on rank 2: tensor([1., 2., 3., 4., 5.], device='cuda:2')
+'''
+
 ###### 2. Reduce & All-Reduce
 def example_reduce():
     tensor = torch.tensor([dist.get_rank() + 1] * 5, dtype=torch.float32).cuda()
